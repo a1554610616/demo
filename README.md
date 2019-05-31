@@ -1,26 +1,31 @@
-# EASYSWOOLE DEMO
-## 关于具体demo在哪
-demo/3.x分支对应了EasySwoole3.x版本的demo,3.x主要是简单的控制器例子，其他使用请看3.x对应的分支。
+#### 基于easyswoole框架实现的服务端可配置多台服务器的聊天室
 
-## 如何运行DEMO
+##### 1、配置前端目录的虚拟主机
 
-安装项目时请不要覆盖默认的配置文件以及EasySwooleEvent事件注册文件
-
-```bash
-git clone https://github.com/easy-swoole/demo.git demo
-cd demo && composer install
-php vendor/bin/easyswoole install
-php easyswoole start
+```
+配置虚拟主机，目录指向/path/client
 ```
 
-## 请先认真阅读手册 再进行体验
+[前端虚拟主机配置文件](<https://github.com/a1554610616/easyswoole_allen/blob/master/App/WebSocket/webim_cluster_client.conf>)
 
-- [EASYSWOOLE在线手册](https://www.easyswoole.com)
-- QQ交流群
-    - VIP群 579434607 （本群需要付费599元）
-    - EasySwoole官方一群 633921431(已满)
-    - EasySwoole官方二群 709134628
-    
-- 商业支持：
-    - QQ 291323003
-    - EMAIL admin@fosuss.com    
+##### 2、websocket负载均衡配置
+
+[nginx配置](<https://github.com/a1554610616/easyswoole_allen/blob/master/App/WebSocket/webim_cluster_proxy.conf>)
+
+##### 3、修改配置文件
+
+```
+1、修改produce.php中的配置CLIENT_DOMAIN配置为如上1中的虚拟主机域名；
+2、将/path/client/static/js/init.js中的wsserver修改为如上2中的负载均衡的nginx端口
+```
+
+##### 4、start
+
+```
+执行：
+php easyswoole start produce
+```
+
+##### 5、访问
+
+> 访问如上1中的前端虚拟主机，如192.168.1.207:8081/index.html

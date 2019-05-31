@@ -9,56 +9,145 @@
 namespace EasySwoole\EasySwoole;
 
 
-use App\Utility\TrackerManager;
+use App\Container\Container;
+use App\Libs\Facades\Room;
+use App\Process\AmqpConsume;
+use App\Process\ChatSubscribe;
+use App\Process\HotReload;
+use App\Process\Job\TestJob;
+use App\Utility\Pool\AmqpPool;
+use App\Utility\Pool\MysqlPool;
+use App\Utility\Pool\Predis\PredisPool;
+use App\Utility\Pool\RedisPool;
+use App\WebSocket\WebSocketEvent;
+use App\WebSocket\WebSocketParser;
 use EasySwoole\Component\Di;
+use EasySwoole\Component\Pool\PoolManager;
 use EasySwoole\EasySwoole\Swoole\EventRegister;
 use EasySwoole\EasySwoole\AbstractInterface\Event;
-use EasySwoole\Http\Message\Status;
-use EasySwoole\Http\Message\Stream;
 use EasySwoole\Http\Request;
 use EasySwoole\Http\Response;
-use EasySwoole\Trace\Bean\Tracker;
+use EasySwoole\Socket\Dispatcher;
+use EasySwoole\Utility\File;
+use PhpAmqpLib\Connection\AMQPStreamConnection;
+use PhpAmqpLib\Message\AMQPMessage;
 
 class EasySwooleEvent implements Event
 {
 
     public static function initialize()
     {
-        // TODO: Implement initialize() method.
         date_default_timezone_set('Asia/Shanghai');
+
+        //加载自定义配置
+        self::loadConf();
+        $conf = Config::getInstance();//获取配置文件
+
+        //注册mysql数据库连接池
+        PoolManager::getInstance()
+            ->register(MysqlPool::class, $conf->getConf('MYSQL.POOL_MAX_NUM'))
+            ->setMinObjectNum((int)$conf->getConf('MYSQL.POOL_MIN_NUM'));
+
+        //注册redis连接池
+        PoolManager::getInstance()
+            ->register(RedisPool::class, $conf->getConf('REDIS.POOL_MAX_NUM'))
+            ->setMinObjectNum((int)$conf->getConf('REDIS.POOL_MIN_NUM'));
+
+        //注册rabbitmq连接池
+        PoolManager::getInstance()
+            ->register(AmqpPool::class, $conf->getConf('AMQP.POOL_MAX_NUM'))
+            ->setMinObjectNum((int)$conf->getConf('AMQP.POOL_MIN_NUM'));
+
+        //注册Predis连接池
+        PoolManager::getInstance()
+            ->register(PredisPool::class, $conf->getConf('REDIS.POOL_MAX_NUM'))
+            ->setMinObjectNum((int)$conf->getConf('REDIS.POOL_MIN_NUM'));
     }
 
     public static function mainServerCreate(EventRegister $register)
     {
+        $conf = Config::getInstance();//获取配置文件
 
-        // TODO: Implement mainServerCreate() method.
+        //注册onWorkerStart回调事件
+        $register->add($register::onWorkerStart, function (\swoole_server $server, int $workerId) {
+            //在每个worker进程启动的时候，预创建redis连接池
+            if ($server->taskworker == false) {
+                //预创建数量,必须小于连接池最大数量
+                PoolManager::getInstance()->getPool(RedisPool::class)->preLoad(6);
+            }
+            // pp("worker:{$workerId} start");
+            if($workerId == 0){
+                //清理聊天室redis数据
+                Room::cleanData();
+            }
+        });
+
+        $swooleServer = ServerManager::getInstance()->getSwooleServer();//获取swoole server
+        $isDev = Core::getInstance()->isDev();
+
+        // if ($isDev) {
+        //自适应热重启,虚拟机下可以传入disableInotify => true,强制使用扫描式热重启,规避虚拟机无法监听事件刷新
+        $process = (new HotReload('HotReload', ['disableInotify' => false]))->getProcess();
+        $swooleServer->addProcess($process);
+        // }
+
+        //amqp消费自定义进程
+        // $arg = [
+        //     'type' => 'direct',
+        //     'exchange' => 'direct_logs',
+        //     'queue' => 'queue',
+        //     'routeKey' => 'test',
+        //     'class' => TestJob::class //要执行的任务类
+        // ];
+        // $amqpConsumeProcess = (new AmqpConsume('AmqpConsume', $arg))->getProcess();
+        // $swooleServer->addProcess($amqpConsumeProcess);
+
+        //websocket控制器
+        $serverType = $conf->getConf('MAIN_SERVER.SERVER_TYPE');
+        if ($serverType == EASYSWOOLE_WEB_SOCKET_SERVER) {
+            //添加聊天订阅消息子进程
+            $chatSubscribeProcess = (new ChatSubscribe())->getProcess();
+            $swooleServer->addProcess($chatSubscribeProcess);
+
+            $config = new \EasySwoole\Socket\Config();
+            $config->setType($config::WEB_SOCKET);
+            $config->setParser(new WebSocketParser());
+
+            $dispatch = new Dispatcher($config);
+            $register->set(EventRegister::onOpen, [WebSocketEvent::class, 'onOpen']);
+            $register->set(EventRegister::onMessage, function (\swoole_websocket_server $server, \swoole_websocket_frame $frame) use ($dispatch) {
+                $dispatch->dispatch($server, $frame->data, $frame);
+            });
+            $register->set(EventRegister::onClose, [WebSocketEvent::class, 'onClose']);
+        }
     }
 
     public static function onRequest(Request $request, Response $response): bool
     {
-        //不建议在这拦截请求,可增加一个控制器基类进行拦截
-        //如果真要拦截,判断之后return false即可
-        $code = $request->getRequestParam('code');
-        if (0/*empty($code)验证失败*/){
-            $data = Array(
-                "code" => Status::CODE_BAD_REQUEST,
-                "result" => [],
-                "msg" => '验证失败'
-            );
-            $response->write(json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-            $response->withHeader('Content-type', 'application/json;charset=utf-8');
-            $response->withStatus(Status::CODE_BAD_REQUEST);
-            return false;
-        }
-
+        $response->withHeader('Content-type', 'application/json;charset=utf-8');
         return true;
     }
 
     public static function afterRequest(Request $request, Response $response): void
     {
-        $responseMsg = $response->getBody()->__toString();
-        Logger::getInstance()->console("响应内容:".$responseMsg);
-        //响应状态码:
-        var_dump($response->getStatusCode());
+
+    }
+
+    /**
+     * 引用自定义配置文件
+     * @throws \Exception
+     */
+    public static function loadConf()
+    {
+        $files = File::scanDirectory(EASYSWOOLE_ROOT . '/App/Config');
+        if (is_array($files)) {
+            foreach ($files['files'] as $file) {
+                $fileNameArr = explode('.', $file);
+                $fileSuffix = end($fileNameArr);
+                if ($fileSuffix == 'php') {
+                    Config::getInstance()->loadFile($file);
+                }
+            }
+        }
     }
 }
